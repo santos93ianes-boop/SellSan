@@ -1,0 +1,5 @@
+<resources>
+    <style name="Theme.SellSan" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <item name="android:fontFamily">sans</item><item name="colorPrimary">#D4AF37</item><item name="colorPrimaryVariant">#B99024</item><item name="colorOnPrimary">#0E0F12</item><item name="android:navigationBarColor">#0E0F12</item><item name="android:statusBarColor">#121316</item><item name="android:windowLightStatusBar">false</item>
+    </style>
+</resources>

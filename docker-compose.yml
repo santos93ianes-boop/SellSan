@@ -1,0 +1,24 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: sellsan
+      POSTGRES_PASSWORD: sellsan_dev
+      POSTGRES_DB: sellsan
+    volumes:
+      - sellsan_pg:/var/lib/postgresql/data
+  api:
+    build: ./server
+    ports:
+      - "8080:8080"
+    environment:
+      PORT: 8080
+      JWT_SECRET: change-this-in-production
+      DATABASE_URL: postgresql://sellsan:sellsan_dev@db:5432/sellsan
+      DATABASE_SSL: "false"
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-5.6-luna}
+    depends_on:
+      - db
+volumes:
+  sellsan_pg:
