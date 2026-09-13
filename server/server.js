@@ -97,87 +97,108 @@ app.post("/api/ai",auth,async(req,res)=>{
 
 
 
-// ===== SellSan V4 • WhatsApp Business Platform =====
-// Configure META_VERIFY_TOKEN, META_ACCESS_TOKEN and META_PHONE_NUMBER_ID on the server.
-// Prices always come from the SellSan service catalog; the AI is never allowed to invent a price.
+// ===== SellSan V5 • WhatsApp Business Platform multiempresa + Embedded Signup =====
 const META_VERIFY_TOKEN = process.env.META_VERIFY_TOKEN || "";
-const META_ACCESS_TOKEN = process.env.META_ACCESS_TOKEN || "";
-const META_PHONE_NUMBER_ID = process.env.META_PHONE_NUMBER_ID || "";
+const META_APP_ID = process.env.META_APP_ID || "";
+const META_APP_SECRET = process.env.META_APP_SECRET || "";
+const META_CONFIG_ID = process.env.META_CONFIG_ID || "";
 const META_GRAPH_VERSION = process.env.META_GRAPH_VERSION || "v23.0";
-const AUTO_REPLY = String(process.env.WHATSAPP_AUTO_REPLY || "true") === "true";
+const PUBLIC_BASE_URL = String(process.env.PUBLIC_BASE_URL || "").replace(/\/$/, "");
+const TOKEN_KEY = crypto.createHash("sha256").update(String(process.env.WHATSAPP_TOKEN_ENCRYPTION_KEY || JWT_SECRET)).digest();
+
+function encryptSecret(text){
+  const iv=crypto.randomBytes(12);const c=crypto.createCipheriv("aes-256-gcm",TOKEN_KEY,iv);const data=Buffer.concat([c.update(String(text),"utf8"),c.final()]);const tag=c.getAuthTag();return Buffer.concat([iv,tag,data]).toString("base64");
+}
+function decryptSecret(blob){
+  const b=Buffer.from(String(blob),"base64"),iv=b.subarray(0,12),tag=b.subarray(12,28),data=b.subarray(28);const d=crypto.createDecipheriv("aes-256-gcm",TOKEN_KEY,iv);d.setAuthTag(tag);return Buffer.concat([d.update(data),d.final()]).toString("utf8");
+}
 
 async function initWhatsappDb(){
   if(!pool) return;
   await pool.query(`CREATE TABLE IF NOT EXISTS services (id TEXT PRIMARY KEY, user_id TEXT REFERENCES users(id) ON DELETE CASCADE, name TEXT NOT NULL, keywords TEXT NOT NULL DEFAULT '', price NUMERIC(12,2) NOT NULL, unit TEXT NOT NULL DEFAULT 'serviço', active BOOLEAN NOT NULL DEFAULT TRUE)`);
-  await pool.query(`CREATE TABLE IF NOT EXISTS whatsapp_messages (id TEXT PRIMARY KEY, wa_id TEXT NOT NULL, direction TEXT NOT NULL, body TEXT NOT NULL, created_at BIGINT NOT NULL, status TEXT NOT NULL DEFAULT 'received')`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS whatsapp_connections (user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE, waba_id TEXT, phone_number_id TEXT UNIQUE NOT NULL, display_phone TEXT, token_enc TEXT NOT NULL, mode TEXT NOT NULL DEFAULT 'assist', connected_at BIGINT NOT NULL, updated_at BIGINT NOT NULL)`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS whatsapp_messages (id TEXT PRIMARY KEY, user_id TEXT REFERENCES users(id) ON DELETE CASCADE, wa_id TEXT NOT NULL, direction TEXT NOT NULL, body TEXT NOT NULL, created_at BIGINT NOT NULL, status TEXT NOT NULL DEFAULT 'received')`);
+  await pool.query(`ALTER TABLE whatsapp_messages ADD COLUMN IF NOT EXISTS user_id TEXT REFERENCES users(id) ON DELETE CASCADE`);
 }
 
-async function sendWhatsAppText(to, body){
-  if(!META_ACCESS_TOKEN || !META_PHONE_NUMBER_ID) throw new Error("WhatsApp não configurado no servidor");
-  const r = await fetch(`https://graph.facebook.com/${META_GRAPH_VERSION}/${META_PHONE_NUMBER_ID}/messages`, {
-    method:"POST", headers:{"Authorization":`Bearer ${META_ACCESS_TOKEN}`,"Content-Type":"application/json"},
-    body:JSON.stringify({messaging_product:"whatsapp",to,type:"text",text:{preview_url:false,body:String(body).slice(0,4000)}})
-  });
-  const j=await r.json(); if(!r.ok) throw new Error(j?.error?.message || "Falha ao enviar WhatsApp"); return j;
-}
+async function getConnectionByUser(userId){if(!pool)return null;return (await pool.query(`SELECT user_id AS "userId",waba_id AS "wabaId",phone_number_id AS "phoneNumberId",display_phone AS "displayPhone",token_enc AS "tokenEnc",mode FROM whatsapp_connections WHERE user_id=$1`,[userId])).rows[0]||null;}
+async function getConnectionByPhoneId(phoneId){if(!pool)return null;return (await pool.query(`SELECT user_id AS "userId",waba_id AS "wabaId",phone_number_id AS "phoneNumberId",display_phone AS "displayPhone",token_enc AS "tokenEnc",mode FROM whatsapp_connections WHERE phone_number_id=$1`,[phoneId])).rows[0]||null;}
 
-async function saveWaMessage(id, waId, direction, body, status="received"){
-  if(pool) await pool.query(`INSERT INTO whatsapp_messages(id,wa_id,direction,body,created_at,status) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(id) DO NOTHING`,[id,waId,direction,body,Date.now(),status]);
+async function sendWhatsAppText(conn,to,body){
+  if(!conn?.tokenEnc||!conn?.phoneNumberId) throw new Error("WhatsApp não conectado");
+  const token=decryptSecret(conn.tokenEnc);
+  const r=await fetch(`https://graph.facebook.com/${META_GRAPH_VERSION}/${conn.phoneNumberId}/messages`,{method:"POST",headers:{Authorization:`Bearer ${token}`,"Content-Type":"application/json"},body:JSON.stringify({messaging_product:"whatsapp",to,type:"text",text:{preview_url:false,body:String(body).slice(0,4000)}})});
+  const j=await r.json();if(!r.ok)throw new Error(j?.error?.message||"Falha ao enviar WhatsApp");return j;
 }
-
-async function catalogMatch(text){
-  if(!pool) return null;
-  const rows=(await pool.query(`SELECT id,name,keywords,price,unit FROM services WHERE active=TRUE ORDER BY name`)).rows;
-  const t=String(text).toLowerCase();
-  let best=null,score=0;
-  for(const x of rows){const words=[x.name,...String(x.keywords||'').split(',')].map(v=>v.trim().toLowerCase()).filter(Boolean);const sc=words.filter(w=>t.includes(w)).length;if(sc>score){score=sc;best=x}}
-  return best;
+async function saveWaMessage(userId,id,waId,direction,body,status="received"){
+  if(pool)await pool.query(`INSERT INTO whatsapp_messages(id,user_id,wa_id,direction,body,created_at,status) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(id) DO NOTHING`,[id,userId,waId,direction,body,Date.now(),status]);
 }
+async function catalogMatch(userId,text){
+  if(!pool)return null;const rows=(await pool.query(`SELECT id,name,keywords,price,unit FROM services WHERE user_id=$1 AND active=TRUE ORDER BY name`,[userId])).rows;const t=String(text).toLowerCase();let best=null,score=0;
+  for(const x of rows){const words=[x.name,...String(x.keywords||"").split(",")].map(v=>v.trim().toLowerCase()).filter(Boolean);const sc=words.filter(w=>t.includes(w)).length;if(sc>score){score=sc;best=x}}return best;
+}
+async function addWhatsappOpportunity(userId,waId,service){
+  if(!pool||!service)return;const snap=await getSnapshot(userId);const quotes=Array.isArray(snap.quotes)?snap.quotes:[];const exists=quotes.find(q=>q.source==="WhatsApp"&&q.phone===waId&&q.service===service.name&&!['Fechado','Perdido'].includes(q.status));
+  if(!exists)quotes.push({id:crypto.randomUUID(),client:waId,phone:waId,service:service.name,value:Number(service.price),details:"Gerado automaticamente pelo atendimento WhatsApp",status:"Orçamento",created:new Date().toLocaleString("pt-BR"),source:"WhatsApp"});
+  await putSnapshot(userId,{...snap,quotes});
+}
+async function markWhatsappApproved(userId,waId){
+  if(!pool)return false;const snap=await getSnapshot(userId),quotes=Array.isArray(snap.quotes)?snap.quotes:[];for(let i=quotes.length-1;i>=0;i--){if(quotes[i].phone===waId&&!['Fechado','Perdido'].includes(quotes[i].status)){quotes[i].status='Fechado';await putSnapshot(userId,{...snap,quotes});return true}}return false;
+}
+function looksApproved(text){return /\b(sim|pode|aprovad[oa]|fechado|vamos fazer|aceito|pode agendar|quero)\b/i.test(String(text));}
 
-async function automaticWhatsappReply(waId, text){
-  const service=await catalogMatch(text);
-  if(service){
-    return `Olá! Sou o assistente SellSan. Encontrei o serviço “${service.name}” no catálogo por R$ ${Number(service.price).toFixed(2).replace('.',',')} (${service.unit}). Para preparar o orçamento correto, me informe seu nome e os detalhes/quantidade do serviço. O valor final só será confirmado conforme as regras cadastradas pela empresa.`;
-  }
+async function automaticWhatsappReply(userId,waId,text){
+  if(looksApproved(text)&&await markWhatsappApproved(userId,waId))return "Perfeito! ✅ Marquei seu orçamento como aprovado. Qual é o melhor dia e horário para o atendimento? Se preferir, um atendente pode assumir a conversa.";
+  const service=await catalogMatch(userId,text);
+  if(service){await addWhatsappOpportunity(userId,waId,service);return `Olá! 👋 Encontrei o serviço “${service.name}” no nosso catálogo. Valor base: R$ ${Number(service.price).toFixed(2).replace('.',',')} (${service.unit}). Para confirmar o orçamento, me informe seu nome e os detalhes/quantidade do serviço. Se estiver de acordo com esse valor base, responda “pode agendar”.`;}
   if(process.env.OPENAI_API_KEY){
-    const client=new OpenAI({apiKey:process.env.OPENAI_API_KEY});
-    const response=await client.responses.create({model:MODEL,store:false,input:`Você é o atendente SellSan no WhatsApp. O cliente escreveu: ${JSON.stringify(String(text).slice(0,1500))}. Responda em português do Brasil, cordialmente, em até 500 caracteres. Não invente preço, desconto, prazo, disponibilidade ou serviço. Se o cliente pedir preço/orçamento e não houver preço fornecido, diga que precisa identificar o serviço e peça somente as informações essenciais. Ofereça atendimento humano quando necessário.`});
-    return response.output_text || "Olá! Recebi sua mensagem. Vou precisar de alguns detalhes para preparar seu atendimento corretamente.";
+    const client=new OpenAI({apiKey:process.env.OPENAI_API_KEY});const response=await client.responses.create({model:MODEL,store:false,input:`Você é o atendente SellSan no WhatsApp. Cliente: ${JSON.stringify(String(text).slice(0,1500))}. Responda em português do Brasil, cordial e curto. Não invente preço, desconto, prazo, agenda ou serviço. Se ele pedir orçamento, peça só os dados essenciais para identificar o serviço. Explique que o preço será consultado no catálogo da empresa. Ofereça atendimento humano se necessário.`});return response.output_text||"Olá! Recebi sua mensagem. Vou precisar de alguns detalhes para preparar seu atendimento corretamente.";
   }
-  return "Olá! Sou o assistente SellSan. Recebi sua mensagem. Para preparar seu orçamento, informe seu nome e descreva o serviço que precisa. Se preferir, posso encaminhar para um atendente.";
+  return "Olá! 👋 Sou o assistente SellSan. Descreva o serviço que precisa e eu consulto o catálogo da empresa para preparar seu orçamento. Se preferir, posso encaminhar para um atendente.";
 }
 
-app.get("/api/whatsapp/webhook",(req,res)=>{
-  const mode=req.query["hub.mode"], token=req.query["hub.verify_token"], challenge=req.query["hub.challenge"];
-  if(mode==="subscribe" && META_VERIFY_TOKEN && token===META_VERIFY_TOKEN) return res.status(200).send(challenge);
-  return res.sendStatus(403);
+app.post('/api/whatsapp/connect-session',auth,async(req,res)=>{
+  if(!PUBLIC_BASE_URL)return res.status(503).json({error:'PUBLIC_BASE_URL não configurada no servidor.'});
+  if(!META_APP_ID||!META_CONFIG_ID||!META_APP_SECRET)return res.status(503).json({error:'Integração Meta ainda não configurada no servidor SellSan.'});
+  const session=jwt.sign({sub:req.user.sub,purpose:'whatsapp-connect'},JWT_SECRET,{expiresIn:'10m'});res.json({url:`${PUBLIC_BASE_URL}/connect/whatsapp?session=${encodeURIComponent(session)}`});
 });
 
-app.post("/api/whatsapp/webhook",async(req,res)=>{
-  // Acknowledge Meta quickly; process after parsing this small payload.
-  res.sendStatus(200);
+app.get('/connect/whatsapp',(req,res)=>{
+  const session=String(req.query.session||'');try{const p=jwt.verify(session,JWT_SECRET);if(p.purpose!=='whatsapp-connect')throw new Error();}catch{return res.status(401).send('Sessão de conexão inválida ou expirada. Volte ao SellSan e tente novamente.');}
+  const appId=JSON.stringify(META_APP_ID),configId=JSON.stringify(META_CONFIG_ID),sessionJs=JSON.stringify(session);
+  res.type('html').send(`<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Conectar WhatsApp • SellSan</title><style>body{margin:0;background:#0e0f12;color:#fff;font-family:Arial,sans-serif;display:grid;place-items:center;min-height:100vh}.card{width:min(92vw,460px);background:#1c1e23;border:1px solid #343741;border-radius:24px;padding:28px;box-sizing:border-box}.brand{color:#e4bd57;font-size:34px;font-weight:800}.wa{font-size:54px}.ok{color:#25d366}.muted{color:#b0b4be;line-height:1.5}button{width:100%;border:0;border-radius:14px;padding:16px;margin-top:18px;background:#e4bd57;color:#0e0f12;font-weight:800;font-size:17px}.status{margin-top:18px;padding:14px;border-radius:12px;background:#111317}</style></head><body><div class="card"><div class="brand">SellSan</div><div class="wa">💬</div><h1>Conectar WhatsApp Business</h1><p class="muted">Entre com a Meta, escolha sua empresa e o número que atenderá seus clientes. O SellSan usa a integração oficial.</p><button id="connect">Conectar com a Meta</button><div id="status" class="status muted">Aguardando conexão.</div></div><script>
+  const SELL_SESSION=${sessionJs};let signup={wabaId:'',phoneNumberId:''};
+  window.fbAsyncInit=function(){FB.init({appId:${appId},cookie:true,xfbml:false,version:${JSON.stringify(META_GRAPH_VERSION)}})};
+  (function(d,s,id){var js,fjs=d.getElementsByTagName(s)[0];if(d.getElementById(id))return;js=d.createElement(s);js.id=id;js.src='https://connect.facebook.net/pt_BR/sdk.js';fjs.parentNode.insertBefore(js,fjs)}(document,'script','facebook-jssdk'));
+  window.addEventListener('message',function(event){try{const data=typeof event.data==='string'?JSON.parse(event.data):event.data;if(data?.type==='WA_EMBEDDED_SIGNUP'){if(data.event==='FINISH'){signup={wabaId:data.data?.waba_id||'',phoneNumberId:data.data?.phone_number_id||''};document.getElementById('status').textContent='Número selecionado. Finalizando conexão…'}else if(data.event==='CANCEL'){document.getElementById('status').textContent='Conexão cancelada.'}}}catch(e){}});
+  document.getElementById('connect').onclick=function(){document.getElementById('status').textContent='Abrindo Meta…';FB.login(async function(response){const code=response?.authResponse?.code;if(!code){document.getElementById('status').textContent='Não foi possível autorizar. Tente novamente.';return;}try{const r=await fetch('/api/whatsapp/embedded-signup/complete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session:SELL_SESSION,code,wabaId:signup.wabaId,phoneNumberId:signup.phoneNumberId})});const j=await r.json();if(!r.ok)throw new Error(j.error||'Falha ao conectar');document.getElementById('status').innerHTML='<span class="ok">✓ WhatsApp Business conectado!</span><br>'+ (j.displayPhone||'');setTimeout(()=>location.href='sellsan://whatsapp-connected',900);}catch(e){document.getElementById('status').textContent=e.message;}},{config_id:${configId},response_type:'code',override_default_response_type:true,extras:{setup:{},featureType:'whatsapp_business_app_onboarding',sessionInfoVersion:'3'}})};
+</script></body></html>`);
+});
+
+app.post('/api/whatsapp/embedded-signup/complete',async(req,res)=>{
+  if(!pool)return res.status(503).json({error:'PostgreSQL é necessário para conexão multiempresa.'});
+  let payload;try{payload=jwt.verify(String(req.body?.session||''),JWT_SECRET);if(payload.purpose!=='whatsapp-connect')throw new Error();}catch{return res.status(401).json({error:'Sessão expirada. Volte ao SellSan e tente novamente.'});}
+  const code=String(req.body?.code||''),phoneNumberId=String(req.body?.phoneNumberId||''),wabaId=String(req.body?.wabaId||'');if(!code||!phoneNumberId)return res.status(400).json({error:'A Meta não retornou o número selecionado. Tente novamente.'});
   try{
-    const changes=req.body?.entry?.flatMap(e=>e.changes||[])||[];
-    for(const change of changes){
-      const value=change?.value||{};
-      for(const m of value.messages||[]){
-        if(m.type!=="text") continue;
-        const waId=String(m.from||""); const body=String(m.text?.body||""); if(!waId||!body) continue;
-        await saveWaMessage(String(m.id||crypto.randomUUID()),waId,"in",body);
-        if(AUTO_REPLY){const reply=await automaticWhatsappReply(waId,body);const sent=await sendWhatsAppText(waId,reply);await saveWaMessage(String(sent?.messages?.[0]?.id||crypto.randomUUID()),waId,"out",reply,"sent");}
-      }
-    }
-  }catch(e){console.error("WhatsApp webhook:",e)}
+    const qs=new URLSearchParams({client_id:META_APP_ID,client_secret:META_APP_SECRET,code});const tr=await fetch(`https://graph.facebook.com/${META_GRAPH_VERSION}/oauth/access_token?${qs}`);const tj=await tr.json();if(!tr.ok||!tj.access_token)throw new Error(tj?.error?.message||'Falha ao trocar autorização por token');
+    const access=tj.access_token;let displayPhone='';try{const pr=await fetch(`https://graph.facebook.com/${META_GRAPH_VERSION}/${phoneNumberId}?fields=display_phone_number,verified_name`,{headers:{Authorization:`Bearer ${access}`}});const pj=await pr.json();displayPhone=pj.display_phone_number||'';}catch{}
+    if(wabaId){try{await fetch(`https://graph.facebook.com/${META_GRAPH_VERSION}/${wabaId}/subscribed_apps`,{method:'POST',headers:{Authorization:`Bearer ${access}`}})}catch{}}
+    await pool.query(`INSERT INTO whatsapp_connections(user_id,waba_id,phone_number_id,display_phone,token_enc,mode,connected_at,updated_at) VALUES($1,$2,$3,$4,$5,'assist',$6,$6) ON CONFLICT(user_id) DO UPDATE SET waba_id=EXCLUDED.waba_id,phone_number_id=EXCLUDED.phone_number_id,display_phone=EXCLUDED.display_phone,token_enc=EXCLUDED.token_enc,updated_at=EXCLUDED.updated_at`,[payload.sub,wabaId,phoneNumberId,displayPhone,encryptSecret(access),Date.now()]);
+    res.json({ok:true,displayPhone});
+  }catch(e){console.error('Embedded signup:',e);res.status(502).json({error:e.message||'Falha ao concluir conexão.'});}
 });
 
-app.get("/api/whatsapp/status",auth,async(_req,res)=>res.json({configured:Boolean(META_VERIFY_TOKEN&&META_ACCESS_TOKEN&&META_PHONE_NUMBER_ID),autoReply:AUTO_REPLY,phoneNumberId:META_PHONE_NUMBER_ID?"configured":"missing"}));
-app.get("/api/whatsapp/messages",auth,async(req,res)=>{if(!pool)return res.json({messages:[]});const rows=(await pool.query(`SELECT id,wa_id AS "waId",direction,body,created_at AS "createdAt",status FROM whatsapp_messages ORDER BY created_at DESC LIMIT 200`)).rows;res.json({messages:rows});});
-app.post("/api/whatsapp/send",auth,async(req,res)=>{try{const to=String(req.body?.to||'').replace(/\D/g,'');const body=String(req.body?.body||'').trim();if(!to||!body)return res.status(400).json({error:'Informe telefone e mensagem.'});const sent=await sendWhatsAppText(to,body);await saveWaMessage(String(sent?.messages?.[0]?.id||crypto.randomUUID()),to,'out',body,'sent');res.json({ok:true,result:sent});}catch(e){res.status(502).json({error:e.message})}});
+app.get('/api/whatsapp/webhook',(req,res)=>{const mode=req.query['hub.mode'],token=req.query['hub.verify_token'],challenge=req.query['hub.challenge'];if(mode==='subscribe'&&META_VERIFY_TOKEN&&token===META_VERIFY_TOKEN)return res.status(200).send(challenge);return res.sendStatus(403);});
+app.post('/api/whatsapp/webhook',async(req,res)=>{res.sendStatus(200);try{const changes=req.body?.entry?.flatMap(e=>e.changes||[])||[];for(const change of changes){const value=change?.value||{},phoneId=String(value?.metadata?.phone_number_id||'');if(!phoneId)continue;const conn=await getConnectionByPhoneId(phoneId);if(!conn)continue;for(const m of value.messages||[]){if(m.type!=='text')continue;const waId=String(m.from||''),body=String(m.text?.body||'');if(!waId||!body)continue;await saveWaMessage(conn.userId,String(m.id||crypto.randomUUID()),waId,'in',body);if(conn.mode==='auto'){const reply=await automaticWhatsappReply(conn.userId,waId,body);const sent=await sendWhatsAppText(conn,waId,reply);await saveWaMessage(conn.userId,String(sent?.messages?.[0]?.id||crypto.randomUUID()),waId,'out',reply,'sent');}}}}catch(e){console.error('WhatsApp webhook:',e)}});
 
-app.get("/api/services",auth,async(req,res)=>{if(!pool)return res.json({services:[]});const rows=(await pool.query(`SELECT id,name,keywords,price,unit,active FROM services WHERE user_id=$1 ORDER BY name`,[req.user.sub])).rows;res.json({services:rows});});
-app.post("/api/services",auth,async(req,res)=>{if(!pool)return res.status(503).json({error:'PostgreSQL necessário para catálogo compartilhado.'});const name=String(req.body?.name||'').trim(),price=Number(req.body?.price);if(!name||!Number.isFinite(price)||price<0)return res.status(400).json({error:'Serviço ou preço inválido.'});const id=crypto.randomUUID();await pool.query(`INSERT INTO services(id,user_id,name,keywords,price,unit,active) VALUES($1,$2,$3,$4,$5,$6,TRUE)`,[id,req.user.sub,name,String(req.body?.keywords||''),price,String(req.body?.unit||'serviço')]);res.json({ok:true,id});});
+app.get('/api/whatsapp/status',auth,async(req,res)=>{const c=await getConnectionByUser(req.user.sub);res.json({configured:Boolean(c),mode:c?.mode||'assist',displayPhone:c?.displayPhone||'',phoneNumberId:c?'configured':'missing'});});
+app.post('/api/whatsapp/mode',auth,async(req,res)=>{if(!pool)return res.status(503).json({error:'Banco indisponível.'});const mode=String(req.body?.mode||'');if(!['auto','assist','manual'].includes(mode))return res.status(400).json({error:'Modo inválido.'});await pool.query(`UPDATE whatsapp_connections SET mode=$1,updated_at=$2 WHERE user_id=$3`,[mode,Date.now(),req.user.sub]);res.json({ok:true,mode});});
+app.get('/api/whatsapp/messages',auth,async(req,res)=>{if(!pool)return res.json({messages:[]});const rows=(await pool.query(`SELECT id,wa_id AS "waId",direction,body,created_at AS "createdAt",status FROM whatsapp_messages WHERE user_id=$1 ORDER BY created_at DESC LIMIT 200`,[req.user.sub])).rows;res.json({messages:rows});});
+app.post('/api/whatsapp/send',auth,async(req,res)=>{try{const conn=await getConnectionByUser(req.user.sub);if(!conn)return res.status(409).json({error:'Conecte seu WhatsApp Business primeiro.'});const to=String(req.body?.to||'').replace(/\D/g,''),body=String(req.body?.body||'').trim();if(!to||!body)return res.status(400).json({error:'Informe telefone e mensagem.'});const sent=await sendWhatsAppText(conn,to,body);await saveWaMessage(req.user.sub,String(sent?.messages?.[0]?.id||crypto.randomUUID()),to,'out',body,'sent');res.json({ok:true,result:sent});}catch(e){res.status(502).json({error:e.message})}});
+app.delete('/api/whatsapp/connection',auth,async(req,res)=>{if(pool)await pool.query(`DELETE FROM whatsapp_connections WHERE user_id=$1`,[req.user.sub]);res.json({ok:true});});
 
-app.use((_req,res)=>res.status(404).json({error:"Rota não encontrada"}));
-await initDb();
-await initWhatsappDb();
-app.listen(PORT,"0.0.0.0",()=>console.log(`SellSan Server on :${PORT} (${pool?"postgres":"json-local"})`));
+app.get('/api/services',auth,async(req,res)=>{if(!pool)return res.json({services:[]});const rows=(await pool.query(`SELECT id,name,keywords,price,unit,active FROM services WHERE user_id=$1 ORDER BY name`,[req.user.sub])).rows;res.json({services:rows});});
+app.post('/api/services',auth,async(req,res)=>{if(!pool)return res.status(503).json({error:'PostgreSQL necessário para catálogo compartilhado.'});const name=String(req.body?.name||'').trim(),price=Number(req.body?.price);if(!name||!Number.isFinite(price)||price<0)return res.status(400).json({error:'Serviço ou preço inválido.'});const id=crypto.randomUUID();await pool.query(`INSERT INTO services(id,user_id,name,keywords,price,unit,active) VALUES($1,$2,$3,$4,$5,$6,TRUE)`,[id,req.user.sub,name,String(req.body?.keywords||''),price,String(req.body?.unit||'serviço')]);res.json({ok:true,id});});
+
+app.use((_req,res)=>res.status(404).json({error:'Rota não encontrada'}));
+await initDb();await initWhatsappDb();app.listen(PORT,'0.0.0.0',()=>console.log(`SellSan Server V5 on :${PORT} (${pool?'postgres':'json-local'})`));

@@ -1,7 +1,14 @@
 plugins { id("com.android.application"); id("org.jetbrains.kotlin.android") }
+
+val sellSanApiUrl = (project.findProperty("SELLSAN_API_URL") as String?) ?: ""
+val escapedApiUrl = sellSanApiUrl.replace("\\", "\\\\").replace("\"", "\\\"")
+
 android {
     namespace = "com.sellsan.app"; compileSdk = 35
-    defaultConfig { applicationId = "com.sellsan.app"; minSdk = 24; targetSdk = 35; versionCode = 4; versionName = "4.0.0" }
+    defaultConfig {
+        applicationId = "com.sellsan.app"; minSdk = 24; targetSdk = 35; versionCode = 5; versionName = "5.0.0"
+        buildConfigField("String", "DEFAULT_SERVER_URL", "\"$escapedApiUrl\"")
+    }
     buildFeatures { buildConfig = true }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
     kotlinOptions { jvmTarget = "17" }

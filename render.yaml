@@ -12,5 +12,15 @@ services:
         sync: false
       - key: OPENAI_MODEL
         value: gpt-5.6-luna
-      - key: DATA_DIR
-        value: /app/data
+      - key: PUBLIC_BASE_URL
+        sync: false
+      - key: META_VERIFY_TOKEN
+        sync: false
+      - key: META_APP_ID
+        sync: false
+      - key: META_APP_SECRET
+        sync: false
+      - key: META_CONFIG_ID
+        sync: false
+      - key: WHATSAPP_TOKEN_ENCRYPTION_KEY
+        generateValue: true

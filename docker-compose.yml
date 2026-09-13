@@ -16,8 +16,15 @@ services:
       JWT_SECRET: change-this-in-production
       DATABASE_URL: postgresql://sellsan:sellsan_dev@db:5432/sellsan
       DATABASE_SSL: "false"
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:8080}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-5.6-luna}
+      META_VERIFY_TOKEN: ${META_VERIFY_TOKEN:-sellsan-dev-verify}
+      META_APP_ID: ${META_APP_ID:-}
+      META_APP_SECRET: ${META_APP_SECRET:-}
+      META_CONFIG_ID: ${META_CONFIG_ID:-}
+      META_GRAPH_VERSION: ${META_GRAPH_VERSION:-v23.0}
+      WHATSAPP_TOKEN_ENCRYPTION_KEY: ${WHATSAPP_TOKEN_ENCRYPTION_KEY:-change-this-too}
     depends_on:
       - db
 volumes:

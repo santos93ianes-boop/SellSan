@@ -1,114 +1,74 @@
-# SellSan V3 — App + Backend + IA
+# SellSan V5 — WhatsApp IA + CRM + Orçamentos
 
-SellSan é um aplicativo Android para prestadores de serviço e pequenos negócios que vendem por atendimento direto/WhatsApp. Esta versão inclui o app Android e o servidor necessário para login, sincronização e IA.
+A V5 redesenha o aplicativo e transforma o WhatsApp no núcleo do SellSan.
 
-## O que funciona no APK
-- Painel com vendas fechadas, potencial, clientes e follow-ups
-- Cadastro de clientes
-- Orçamentos e status comerciais
-- Funil: Novo → Conversando → Orçamento → Follow-up → Fechado → Perdido
-- Agenda de atendimentos
-- Indicadores de faturamento, perdas e conversão
-- Compartilhamento de mensagem pelo WhatsApp
-- Geração e compartilhamento de PDF do orçamento
-- Lembrete local de follow-up para o dia seguinte
-- Entrada por voz na área SellSan IA
-- Modo local offline
-- Cadastro/login no servidor
-- Sincronização entre celular e nuvem
-- SellSan IA via backend protegido
+## O que mudou no app
+- Interface nova em preto/grafite + dourado, com navegação inferior simples de 5 itens.
+- Ícone SellSan redesenhado com **S + gráfico de crescimento**.
+- Tela inicial com ações rápidas e indicadores.
+- Tela **WhatsApp IA** com status real, conversas, modos de atendimento e catálogo de preços.
+- `Mais` concentra Agenda, Funil, IA, Resultados e Conta para não poluir a navegação.
+- Tamanhos e espaçamentos em dp para evitar os textos quebrados vistos na V4.
+- URL do servidor pode vir pronta no APK via Secret do GitHub e fica oculta do comprador final.
 
-## Estrutura
-- `app/` — aplicativo Android nativo Kotlin
-- `server/` — API Node.js/Express
-- `docker-compose.yml` — API + PostgreSQL para ambiente próprio
-- `render.yaml` — base para hospedagem do backend em serviço compatível com Docker
-- `.github/workflows/android.yml` — geração automática do APK no GitHub
+## Fluxo do WhatsApp
+1. O usuário cria/entra na conta SellSan.
+2. Abre **WhatsApp → Conectar com a Meta**.
+3. O backend cria uma sessão curta e abre o fluxo oficial de Embedded Signup da Meta.
+4. O usuário entra com a Meta, escolhe empresa e número.
+5. O servidor troca a autorização por credenciais, criptografa o token e associa aquele número à conta SellSan.
+6. Mensagens chegam pelo webhook oficial da WhatsApp Business Platform.
+7. O SellSan salva a conversa, identifica o serviço no catálogo e, no modo automático, responde.
+8. Quando encontra um serviço, cria uma oportunidade/orçamento no CRM com o preço cadastrado.
+9. A IA **não inventa preço**: preços vêm do catálogo da empresa.
 
-## 1. Gerar o APK no GitHub
-1. Crie um repositório vazio.
-2. Envie **todo o conteúdo deste ZIP** para a raiz do repositório.
-3. Abra **Actions**.
-4. Execute **Build SellSan Android APK**.
-5. Baixe o artifact `SellSan-V3-debug-apk`.
+## Modos de atendimento
+- `IA automática`: responde automaticamente quando permitido.
+- `IA sugere`: registra as mensagens; o humano assume o envio.
+- `Humano`: nenhuma resposta automática.
 
-O APK funciona imediatamente em **modo local**. Clientes, orçamentos, funil, agenda, PDF, lembretes e WhatsApp não dependem do servidor.
+## GitHub → APK
+O workflow está em `.github/workflows/android.yml`.
 
-## 2. Colocar nuvem + login + IA para funcionar
-O servidor precisa estar publicado em uma URL HTTPS. Ele usa estas variáveis:
+Crie no repositório o Secret:
+
+`SELLSAN_API_URL=https://api.seudominio.com`
+
+Depois execute **Actions → Build SellSan Android APK**. O artifact será `SellSan-V5-debug-apk`.
+
+Sem esse Secret o APK ainda compila, mas mostra a configuração avançada para informar a URL manualmente.
+
+## Backend obrigatório para WhatsApp real
+Publique `server/` com PostgreSQL e configure:
 
 ```env
 PORT=8080
-JWT_SECRET=uma-chave-grande-e-secreta
-DATABASE_URL=postgresql://usuario:senha@host:5432/sellsan
+JWT_SECRET=uma-chave-forte
+DATABASE_URL=postgresql://...
 DATABASE_SSL=true
-OPENAI_API_KEY=sk-...
+PUBLIC_BASE_URL=https://api.seudominio.com
+OPENAI_API_KEY=...
 OPENAI_MODEL=gpt-5.6-luna
-CORS_ORIGIN=*
+META_VERIFY_TOKEN=um-token-de-verificacao
+META_APP_ID=...
+META_APP_SECRET=...
+META_CONFIG_ID=...
+META_GRAPH_VERSION=v23.0
+WHATSAPP_TOKEN_ENCRYPTION_KEY=uma-chave-longa
 ```
 
-**Nunca coloque `OPENAI_API_KEY` dentro do APK ou no código público do GitHub.**
+Na Meta, o webhook do app deve apontar para:
 
-Depois de publicar o backend:
-1. Abra o SellSan no celular.
-2. Entre em **Conta**.
-3. Informe a URL HTTPS do servidor, por exemplo `https://api.seudominio.com`.
-4. Salve.
-5. Crie uma conta SellSan.
-6. Toque em **Sincronizar nuvem**.
-7. Abra **IA** e faça uma pergunta.
+`https://api.seudominio.com/api/whatsapp/webhook`
 
-## 3. Testar o backend localmente com Docker
-Com Docker instalado:
+O `META_VERIFY_TOKEN` precisa ser o mesmo informado na configuração do webhook.
 
-```bash
-export OPENAI_API_KEY="sua-chave"
-docker compose up --build
-```
+## Segurança
+- Chave OpenAI nunca fica no APK.
+- App Secret e tokens da Meta nunca ficam no APK.
+- Tokens de WhatsApp de cada empresa são armazenados criptografados no banco.
+- A sessão usada para conectar o WhatsApp expira em 10 minutos.
+- Cada conta SellSan só enxerga suas próprias conversas, serviços e conexão WhatsApp.
 
-API: `http://localhost:8080`
-Health check: `http://localhost:8080/api/health`
-
-Para Android físico, `localhost` não aponta para o computador. Use o IP local do computador, por exemplo `http://192.168.0.10:8080`, apenas para teste na mesma rede. Em produção use HTTPS.
-
-## Banco de dados
-- Com `DATABASE_URL`: PostgreSQL persistente.
-- Sem `DATABASE_URL`: fallback JSON local do servidor, indicado apenas para desenvolvimento.
-
-A sincronização une registros pelo campo `id` para reduzir risco de sobrescrever registros criados em outro aparelho.
-
-## IA
-A IA é chamada exclusivamente pelo backend em `POST /api/ai`. O servidor usa a OpenAI Responses API. O modelo padrão pode ser alterado pela variável `OPENAI_MODEL`.
-
-## Segurança implementada
-- Senhas com bcrypt
-- Login com JWT
-- OpenAI key somente no servidor
-- Helmet
-- Rate limit
-- Limite de payload
-- Banco PostgreSQL em produção
-- Segredos fora do APK
-- Resposta de IA limitada ao contexto enviado
-
-## Antes de vender em produção
-Esta versão já contém toda a arquitetura funcional necessária para operar app + servidor + IA. Para comercialização em escala, ainda é recomendável adicionar: recuperação de senha por e-mail, termos/LGPD, exclusão de conta, cobrança/assinatura, logs/monitoramento, backup automatizado e assinatura release da Play Store.
-
-## SellSan V4 — WhatsApp oficial + IA
-
-A V4 adiciona o núcleo de atendimento automatizado pela **WhatsApp Business Platform (Cloud API)**. O app ganhou a tela **WhatsApp IA**, status real da conexão, envio oficial pelo servidor, histórico recente e cadastro de serviços/preços usados pelo atendimento automático.
-
-### Fluxo real
-1. Cliente envia mensagem ao número WhatsApp Business da empresa.
-2. A Meta entrega o evento em `GET/POST /api/whatsapp/webhook`.
-3. O servidor SellSan registra a conversa.
-4. O motor procura um serviço/preço no catálogo PostgreSQL.
-5. Quando encontra preço, responde usando o valor cadastrado; quando não encontra, a IA coleta informações sem inventar valores.
-6. A resposta é enviada pela Cloud API e fica visível no SellSan.
-7. O proprietário pode assumir e enviar mensagens manualmente pelo app.
-
-### Variáveis obrigatórias para WhatsApp
-No servidor/hospedagem, configure `META_VERIFY_TOKEN`, `META_ACCESS_TOKEN`, `META_PHONE_NUMBER_ID` e, opcionalmente, `META_GRAPH_VERSION`. Configure o webhook na Meta como `https://SEU-SERVIDOR/api/whatsapp/webhook` e assine eventos de mensagens. **Nunca coloque o token da Meta no APK.**
-
-### Limite importante antes de vender
-O código está preparado para a integração oficial, mas nenhum ZIP pode trazer um número WhatsApp Business, token Meta ou chave OpenAI já autorizados. Esses itens pertencem à conta comercial de cada operação e precisam ser configurados no servidor. Para um SaaS multiempresa em escala, o próximo passo é implementar o fluxo de onboarding/Embedded Signup da Meta para cada assinante conectar o próprio número.
+## Importante
+Nenhum projeto pode sair do ZIP já autenticado em uma conta Meta específica. A conexão real depende das credenciais do aplicativo Meta do SellSan e da autorização de cada empresa. A V5 elimina a necessidade de o comprador copiar token, Phone Number ID ou URL manualmente durante o uso normal: ele toca em **Conectar com a Meta** e segue o fluxo oficial.
