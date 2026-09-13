@@ -63,11 +63,11 @@ class MainActivity : AppCompatActivity() {
 
         val nav = HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled=false }
         val row = LinearLayout(this).apply { orientation=LinearLayout.HORIZONTAL; setPadding(8,8,8,8); setBackgroundColor(Color.rgb(18,19,22)) }
-        listOf("Início" to "dashboard","Clientes" to "clients","Funil" to "funnel","Orç." to "quotes","Agenda" to "agenda","IA" to "ai","Resultados" to "results","Conta" to "settings").forEach { (label,id) ->
+        listOf("Início" to "dashboard","WhatsApp IA" to "whatsapp","Clientes" to "clients","Funil" to "funnel","Orç." to "quotes","Agenda" to "agenda","IA" to "ai","Resultados" to "results","Conta" to "settings").forEach { (label,id) ->
             row.addView(navButton(label, screen==id) { showShell(id) }, LinearLayout.LayoutParams(170,-2))
         }
         nav.addView(row); root.addView(nav); setContentView(root)
-        when(screen){"clients"->clientsScreen();"funnel"->funnelScreen();"quotes"->quotesScreen();"agenda"->agendaScreen();"ai"->aiScreen();"results"->resultsScreen();"settings"->settingsScreen();else->dashboardScreen()}
+        when(screen){"whatsapp"->whatsappScreen();"clients"->clientsScreen();"funnel"->funnelScreen();"quotes"->quotesScreen();"agenda"->agendaScreen();"ai"->aiScreen();"results"->resultsScreen();"settings"->settingsScreen();else->dashboardScreen()}
     }
 
     private fun dashboardScreen(){
@@ -83,6 +83,40 @@ class MainActivity : AppCompatActivity() {
         section("O que fazer agora")
         val hints=mutableListOf<String>(); if(open>0)hints.add("Você tem $open orçamento(s) em aberto. Revise o funil e faça follow-up.");if(follow>0)hints.add("$follow cliente(s) já estão no estágio Follow-up.");if(clients.length()==0)hints.add("Cadastre o primeiro cliente para iniciar seu funil comercial.");if(hints.isEmpty())hints.add("Sem pendências críticas. Continue alimentando novas oportunidades.")
         hints.forEach{content.addView(txt("• $it",14,false),margin())}
+    }
+
+    private fun whatsappScreen(){
+        title("WhatsApp com IA","Atendimento automático conectado ao servidor SellSan. A IA conversa; preços e regras vêm do catálogo da empresa.")
+        val status=TextView(this).apply{text="Verificando integração...";textSize=14f;setTextColor(Color.WHITE);setPadding(18,18,18,18);setBackgroundColor(panel)}
+        content.addView(status,margin())
+        content.addView(button("Verificar WhatsApp oficial"){
+            if(!isLogged()) return@button toast("Entre na conta SellSan primeiro")
+            thread{val r=CloudClient.request(serverUrl(),"/api/whatsapp/status","GET",token());runOnUiThread{status.text=if(r.ok&&r.body?.optBoolean("configured")==true)"● WhatsApp Business conectado • IA automática ${if(r.body.optBoolean("autoReply")) "ATIVA" else "DESATIVADA"}" else "○ WhatsApp ainda não configurado no servidor"}}
+        })
+        section("Enviar pelo servidor")
+        val phone=input("Telefone do cliente com DDD e país (ex.: 5541999999999)");val message=input("Mensagem");message.minLines=4;content.addView(phone);content.addView(message)
+        content.addView(button("Enviar mensagem oficial"){
+            if(!isLogged()) return@button toast("Entre na conta primeiro")
+            val b=JSONObject().put("to",phone.text.toString()).put("body",message.text.toString());thread{val r=CloudClient.request(serverUrl(),"/api/whatsapp/send","POST",token(),b);runOnUiThread{toast(if(r.ok)"Mensagem enviada pelo WhatsApp Business" else r.message)}}
+        })
+        section("Catálogo de serviços e preços")
+        val serviceName=input("Serviço (ex.: Instalação ar-condicionado 12.000 BTUs)");val servicePrice=input("Preço base");val serviceKeywords=input("Palavras-chave separadas por vírgula");content.addView(serviceName);content.addView(servicePrice);content.addView(serviceKeywords)
+        content.addView(secondary("Cadastrar serviço para a IA"){
+            if(!isLogged()) return@secondary toast("Entre na conta primeiro")
+            val price=parseMoney(servicePrice.text.toString());if(serviceName.text.isBlank()||price<=0)return@secondary toast("Informe serviço e preço")
+            val b=JSONObject().put("name",serviceName.text.toString()).put("price",price).put("keywords",serviceKeywords.text.toString()).put("unit","serviço");thread{val r=CloudClient.request(serverUrl(),"/api/services","POST",token(),b);runOnUiThread{toast(if(r.ok)"Serviço cadastrado" else r.message)}}
+        })
+        section("Conversas recentes")
+        val conversations=LinearLayout(this).apply{orientation=LinearLayout.VERTICAL};content.addView(conversations)
+        content.addView(secondary("Atualizar conversas"){
+            if(!isLogged()) return@secondary toast("Entre na conta primeiro")
+            thread{val r=CloudClient.request(serverUrl(),"/api/whatsapp/messages","GET",token());runOnUiThread{
+                conversations.removeAllViews();val a=r.body?.optJSONArray("messages")?:JSONArray();if(!r.ok||a.length()==0)conversations.addView(txt(if(r.ok)"Nenhuma conversa recebida ainda." else r.message,12,false))
+                for(i in 0 until a.length()){val m=a.getJSONObject(i);val b=box();b.addView(txt((if(m.optString("direction")=="in")"Cliente → SellSan" else "SellSan → Cliente")+" • "+m.optString("waId"),13,true));b.addView(txt(m.optString("body"),13,false));conversations.addView(b,margin())}
+            }}
+        })
+        section("Como funciona")
+        content.addView(txt("Quando a Meta envia uma mensagem ao webhook do SellSan, o servidor registra a conversa, procura o serviço no catálogo e responde pelo número oficial da empresa. A IA nunca deve inventar preços. Para produção, configure as credenciais da Meta somente no servidor.",12,false))
     }
 
     private fun clientsScreen(){

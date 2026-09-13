@@ -67,7 +67,7 @@ async function putSnapshot(userId, snapshot) {
 function tokenFor(user) { return jwt.sign({ sub: user.id, email: user.email }, JWT_SECRET, { expiresIn: "30d" }); }
 function auth(req, res, next) { const raw=req.headers.authorization||"";const token=raw.startsWith("Bearer ")?raw.slice(7):"";try{req.user=jwt.verify(token,JWT_SECRET);next();}catch{res.status(401).json({error:"Sessão inválida. Entre novamente."});} }
 
-app.get("/api/health", async (_req,res)=>{let db="json-local";try{if(pool){await pool.query("SELECT 1");db="postgres";}}catch{db="postgres-error";}res.json({ok:true,service:"SellSan Server",version:"3.0.0",database:db,ai:Boolean(process.env.OPENAI_API_KEY)});});
+app.get("/api/health", async (_req,res)=>{let db="json-local";try{if(pool){await pool.query("SELECT 1");db="postgres";}}catch{db="postgres-error";}res.json({ok:true,service:"SellSan Server",version:"4.0.0",database:db,ai:Boolean(process.env.OPENAI_API_KEY)});});
 
 app.post("/api/auth/register", async (req,res)=>{
   try{
@@ -95,6 +95,89 @@ app.post("/api/ai",auth,async(req,res)=>{
   }catch(e){console.error(e);res.status(502).json({error:"Falha ao consultar a IA. Verifique chave, créditos e modelo."});}
 });
 
+
+
+// ===== SellSan V4 • WhatsApp Business Platform =====
+// Configure META_VERIFY_TOKEN, META_ACCESS_TOKEN and META_PHONE_NUMBER_ID on the server.
+// Prices always come from the SellSan service catalog; the AI is never allowed to invent a price.
+const META_VERIFY_TOKEN = process.env.META_VERIFY_TOKEN || "";
+const META_ACCESS_TOKEN = process.env.META_ACCESS_TOKEN || "";
+const META_PHONE_NUMBER_ID = process.env.META_PHONE_NUMBER_ID || "";
+const META_GRAPH_VERSION = process.env.META_GRAPH_VERSION || "v23.0";
+const AUTO_REPLY = String(process.env.WHATSAPP_AUTO_REPLY || "true") === "true";
+
+async function initWhatsappDb(){
+  if(!pool) return;
+  await pool.query(`CREATE TABLE IF NOT EXISTS services (id TEXT PRIMARY KEY, user_id TEXT REFERENCES users(id) ON DELETE CASCADE, name TEXT NOT NULL, keywords TEXT NOT NULL DEFAULT '', price NUMERIC(12,2) NOT NULL, unit TEXT NOT NULL DEFAULT 'serviço', active BOOLEAN NOT NULL DEFAULT TRUE)`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS whatsapp_messages (id TEXT PRIMARY KEY, wa_id TEXT NOT NULL, direction TEXT NOT NULL, body TEXT NOT NULL, created_at BIGINT NOT NULL, status TEXT NOT NULL DEFAULT 'received')`);
+}
+
+async function sendWhatsAppText(to, body){
+  if(!META_ACCESS_TOKEN || !META_PHONE_NUMBER_ID) throw new Error("WhatsApp não configurado no servidor");
+  const r = await fetch(`https://graph.facebook.com/${META_GRAPH_VERSION}/${META_PHONE_NUMBER_ID}/messages`, {
+    method:"POST", headers:{"Authorization":`Bearer ${META_ACCESS_TOKEN}`,"Content-Type":"application/json"},
+    body:JSON.stringify({messaging_product:"whatsapp",to,type:"text",text:{preview_url:false,body:String(body).slice(0,4000)}})
+  });
+  const j=await r.json(); if(!r.ok) throw new Error(j?.error?.message || "Falha ao enviar WhatsApp"); return j;
+}
+
+async function saveWaMessage(id, waId, direction, body, status="received"){
+  if(pool) await pool.query(`INSERT INTO whatsapp_messages(id,wa_id,direction,body,created_at,status) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(id) DO NOTHING`,[id,waId,direction,body,Date.now(),status]);
+}
+
+async function catalogMatch(text){
+  if(!pool) return null;
+  const rows=(await pool.query(`SELECT id,name,keywords,price,unit FROM services WHERE active=TRUE ORDER BY name`)).rows;
+  const t=String(text).toLowerCase();
+  let best=null,score=0;
+  for(const x of rows){const words=[x.name,...String(x.keywords||'').split(',')].map(v=>v.trim().toLowerCase()).filter(Boolean);const sc=words.filter(w=>t.includes(w)).length;if(sc>score){score=sc;best=x}}
+  return best;
+}
+
+async function automaticWhatsappReply(waId, text){
+  const service=await catalogMatch(text);
+  if(service){
+    return `Olá! Sou o assistente SellSan. Encontrei o serviço “${service.name}” no catálogo por R$ ${Number(service.price).toFixed(2).replace('.',',')} (${service.unit}). Para preparar o orçamento correto, me informe seu nome e os detalhes/quantidade do serviço. O valor final só será confirmado conforme as regras cadastradas pela empresa.`;
+  }
+  if(process.env.OPENAI_API_KEY){
+    const client=new OpenAI({apiKey:process.env.OPENAI_API_KEY});
+    const response=await client.responses.create({model:MODEL,store:false,input:`Você é o atendente SellSan no WhatsApp. O cliente escreveu: ${JSON.stringify(String(text).slice(0,1500))}. Responda em português do Brasil, cordialmente, em até 500 caracteres. Não invente preço, desconto, prazo, disponibilidade ou serviço. Se o cliente pedir preço/orçamento e não houver preço fornecido, diga que precisa identificar o serviço e peça somente as informações essenciais. Ofereça atendimento humano quando necessário.`});
+    return response.output_text || "Olá! Recebi sua mensagem. Vou precisar de alguns detalhes para preparar seu atendimento corretamente.";
+  }
+  return "Olá! Sou o assistente SellSan. Recebi sua mensagem. Para preparar seu orçamento, informe seu nome e descreva o serviço que precisa. Se preferir, posso encaminhar para um atendente.";
+}
+
+app.get("/api/whatsapp/webhook",(req,res)=>{
+  const mode=req.query["hub.mode"], token=req.query["hub.verify_token"], challenge=req.query["hub.challenge"];
+  if(mode==="subscribe" && META_VERIFY_TOKEN && token===META_VERIFY_TOKEN) return res.status(200).send(challenge);
+  return res.sendStatus(403);
+});
+
+app.post("/api/whatsapp/webhook",async(req,res)=>{
+  // Acknowledge Meta quickly; process after parsing this small payload.
+  res.sendStatus(200);
+  try{
+    const changes=req.body?.entry?.flatMap(e=>e.changes||[])||[];
+    for(const change of changes){
+      const value=change?.value||{};
+      for(const m of value.messages||[]){
+        if(m.type!=="text") continue;
+        const waId=String(m.from||""); const body=String(m.text?.body||""); if(!waId||!body) continue;
+        await saveWaMessage(String(m.id||crypto.randomUUID()),waId,"in",body);
+        if(AUTO_REPLY){const reply=await automaticWhatsappReply(waId,body);const sent=await sendWhatsAppText(waId,reply);await saveWaMessage(String(sent?.messages?.[0]?.id||crypto.randomUUID()),waId,"out",reply,"sent");}
+      }
+    }
+  }catch(e){console.error("WhatsApp webhook:",e)}
+});
+
+app.get("/api/whatsapp/status",auth,async(_req,res)=>res.json({configured:Boolean(META_VERIFY_TOKEN&&META_ACCESS_TOKEN&&META_PHONE_NUMBER_ID),autoReply:AUTO_REPLY,phoneNumberId:META_PHONE_NUMBER_ID?"configured":"missing"}));
+app.get("/api/whatsapp/messages",auth,async(req,res)=>{if(!pool)return res.json({messages:[]});const rows=(await pool.query(`SELECT id,wa_id AS "waId",direction,body,created_at AS "createdAt",status FROM whatsapp_messages ORDER BY created_at DESC LIMIT 200`)).rows;res.json({messages:rows});});
+app.post("/api/whatsapp/send",auth,async(req,res)=>{try{const to=String(req.body?.to||'').replace(/\D/g,'');const body=String(req.body?.body||'').trim();if(!to||!body)return res.status(400).json({error:'Informe telefone e mensagem.'});const sent=await sendWhatsAppText(to,body);await saveWaMessage(String(sent?.messages?.[0]?.id||crypto.randomUUID()),to,'out',body,'sent');res.json({ok:true,result:sent});}catch(e){res.status(502).json({error:e.message})}});
+
+app.get("/api/services",auth,async(req,res)=>{if(!pool)return res.json({services:[]});const rows=(await pool.query(`SELECT id,name,keywords,price,unit,active FROM services WHERE user_id=$1 ORDER BY name`,[req.user.sub])).rows;res.json({services:rows});});
+app.post("/api/services",auth,async(req,res)=>{if(!pool)return res.status(503).json({error:'PostgreSQL necessário para catálogo compartilhado.'});const name=String(req.body?.name||'').trim(),price=Number(req.body?.price);if(!name||!Number.isFinite(price)||price<0)return res.status(400).json({error:'Serviço ou preço inválido.'});const id=crypto.randomUUID();await pool.query(`INSERT INTO services(id,user_id,name,keywords,price,unit,active) VALUES($1,$2,$3,$4,$5,$6,TRUE)`,[id,req.user.sub,name,String(req.body?.keywords||''),price,String(req.body?.unit||'serviço')]);res.json({ok:true,id});});
+
 app.use((_req,res)=>res.status(404).json({error:"Rota não encontrada"}));
 await initDb();
+await initWhatsappDb();
 app.listen(PORT,"0.0.0.0",()=>console.log(`SellSan Server on :${PORT} (${pool?"postgres":"json-local"})`));

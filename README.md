@@ -93,3 +93,22 @@ A IA é chamada exclusivamente pelo backend em `POST /api/ai`. O servidor usa a 
 
 ## Antes de vender em produção
 Esta versão já contém toda a arquitetura funcional necessária para operar app + servidor + IA. Para comercialização em escala, ainda é recomendável adicionar: recuperação de senha por e-mail, termos/LGPD, exclusão de conta, cobrança/assinatura, logs/monitoramento, backup automatizado e assinatura release da Play Store.
+
+## SellSan V4 — WhatsApp oficial + IA
+
+A V4 adiciona o núcleo de atendimento automatizado pela **WhatsApp Business Platform (Cloud API)**. O app ganhou a tela **WhatsApp IA**, status real da conexão, envio oficial pelo servidor, histórico recente e cadastro de serviços/preços usados pelo atendimento automático.
+
+### Fluxo real
+1. Cliente envia mensagem ao número WhatsApp Business da empresa.
+2. A Meta entrega o evento em `GET/POST /api/whatsapp/webhook`.
+3. O servidor SellSan registra a conversa.
+4. O motor procura um serviço/preço no catálogo PostgreSQL.
+5. Quando encontra preço, responde usando o valor cadastrado; quando não encontra, a IA coleta informações sem inventar valores.
+6. A resposta é enviada pela Cloud API e fica visível no SellSan.
+7. O proprietário pode assumir e enviar mensagens manualmente pelo app.
+
+### Variáveis obrigatórias para WhatsApp
+No servidor/hospedagem, configure `META_VERIFY_TOKEN`, `META_ACCESS_TOKEN`, `META_PHONE_NUMBER_ID` e, opcionalmente, `META_GRAPH_VERSION`. Configure o webhook na Meta como `https://SEU-SERVIDOR/api/whatsapp/webhook` e assine eventos de mensagens. **Nunca coloque o token da Meta no APK.**
+
+### Limite importante antes de vender
+O código está preparado para a integração oficial, mas nenhum ZIP pode trazer um número WhatsApp Business, token Meta ou chave OpenAI já autorizados. Esses itens pertencem à conta comercial de cada operação e precisam ser configurados no servidor. Para um SaaS multiempresa em escala, o próximo passo é implementar o fluxo de onboarding/Embedded Signup da Meta para cada assinante conectar o próprio número.
